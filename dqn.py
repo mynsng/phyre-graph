@@ -2,13 +2,14 @@ from neural_model import *
 import phyre
 import torch
 import numpy as np
+import pdb
 
 default_params = {
     'network_type'        :'resnet18',
-    'train_batch_size'    : 64,
+    'train_batch_size'    : 16,
     'max_train_actions'   : 100000,
     'balance_classes'     : True,   # balancing is critical for the 2B-tasks
-    'updates'             : 150000, # number of total updates to perform
+    'updates'             : 200000, # number of total updates to perform
     'cosine_scheduler'    : True,
     'learning_rate'       : 3e-4,
     'action_hidden_size'  : 512,
@@ -19,9 +20,9 @@ default_params = {
     'num_auccess_tasks'   : 200,
     'qa_coef'             : 1,
     'max_predict_actions' : 1,
-    'embed_size'          : 6,
-    'hidden_size'         : 512,
-    'report_statistic'    : 149000,
+    'embed_size'          : 128,
+    'hidden_size'         : 128,
+    'report_statistic'    : 199000,
     
     'rank_size'            : 10000,
     'eval_batch_size'      : 128,
@@ -41,6 +42,15 @@ class DQNAgent():
                                         tier, 
                                         dev_task_ids, 
                                         default_params)
+        
+        #for name, param in model.named_parameters():
+        #    if param.requires_grad:
+        #        print(name, param.data.shape)
+        #        
+        #total_params = sum(p.numel() for p in model.parameters())
+        #print(total_params)
+        #pdb.set_trace()
+    
         state = dict(model =model, cache = cache)
         #torch.cuda.empty_cache()
         return state, statistic

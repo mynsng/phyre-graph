@@ -82,6 +82,7 @@ class NeuralModel():
         losses = []
         max_loss_index = []
         max_loss = []
+        mean_loss = []
         max_loss_action = []
         min_loss_index = []
         min_loss = []
@@ -96,20 +97,7 @@ class NeuralModel():
         actions = actions.pin_memory()
         is_solved = is_solved.pin_memory()
 
-        N = np.eye(5)
-        for i in range(5):
-            if i == 0 :
-                n = N[i]
-                Rs = np.tile(n , (5,1))
-            else:
-                n = N[i]
-                n = np.tile(n, (5,1))
-                Rs = np.concatenate((Rs, n))
-
-        Rs = np.transpose(Rs)
-        Rr = np.tile(N, (1,5))
-
-        edge = dict(Rs = Rs, Rr = Rr)
+        edge = self._make_edges()
 
         for batch_id, batch_indices in enumerate(train_indices_sampler(),start=batch_start):
             if batch_id >= params['updates']:
@@ -121,7 +109,7 @@ class NeuralModel():
             batch_is_solved = is_solved[batch_indices].to(device, non_blocking=True)
             batch_size = batch_task_indices.shape[0]
 
-            batch_answer = np.zeros((batch_size, 10, 6))
+            batch_answer = np.zeros((batch_size, 16, 8))
             #pdb.set_trace()
             batch_num = 0
 
@@ -130,35 +118,43 @@ class NeuralModel():
                 intermediate = np.array(intermediate)
                 intermediate_full = self._make_17(intermediate)
 
-                for t in range(10):
-                    input_t = t+1
+                for t in range(16):
+                    input_t = t + 1
 
                     location_rb = np.where(intermediate_full[input_t]==1)
                     location_gb = np.where(intermediate_full[input_t]==2)
                     location_bb = np.where(intermediate_full[input_t]==3)
                     if location_bb[0].size == 0:
                         location_bb = np.where(intermediate_full[input_t]==4)
+                    location_grayb = np.where(intermediate_full[input_t]==5)
                     batch_answer[batch_num][t][0] = np.mean(location_rb[0]) / 256
                     batch_answer[batch_num][t][1] = np.mean(location_rb[1]) / 256
                     batch_answer[batch_num][t][2] = np.mean(location_gb[0]) / 256
                     batch_answer[batch_num][t][3] = np.mean(location_gb[1]) / 256
                     batch_answer[batch_num][t][4] = np.mean(location_bb[0]) / 256
                     batch_answer[batch_num][t][5] = np.mean(location_bb[1]) / 256
+                    if location_grayb[0].size == 0:
+                        batch_answer[batch_num][t][6] = 0
+                        batch_answer[batch_num][t][7] = 0
+                    else:
+                        batch_answer[batch_num][t][6] = np.mean(location_grayb[0]) / 256
+                        batch_answer[batch_num][t][7] = np.mean(location_grayb[1]) / 256
 
                     #pdb.set_trace()
 
-                del intermediate, intermediate_full, location_gb, location_bb, location_rb
+                del intermediate, intermediate_full, location_gb, location_bb, location_rb, location_grayb
                 batch_num += 1
 
            # pdb.set_trace()
 
             optimizer.zero_grad()
             embedding = model(batch_observations, batch_actions)
-            qa_loss, ce_loss = model.compute_loss(embedding, batch_answer, batch_is_solved)
+            qa_loss= model.compute_loss(embedding, edge, batch_answer, batch_is_solved)
 
             if (batch_id+1) > params['report_statistic']:
                 max_loss.append(qa_loss.max().item())
                 min_loss.append(qa_loss.min().item())
+                mean_loss.append(qa_loss.mean().item())
                 loss_var.append(qa_loss.var().item())
                 max_index = qa_loss.argmax().item()
                 min_index = qa_loss.argmin().item()
@@ -167,7 +163,7 @@ class NeuralModel():
                 max_loss_action.append(batch_actions[max_index])
                 min_loss_action.append(batch_actions[min_index])
 
-            loss = qa_loss + ce_loss
+            loss = qa_loss# + ce_loss
             loss = torch.mean(loss)
 
             loss.backward()
@@ -183,6 +179,7 @@ class NeuralModel():
                 logging.debug('Iter: %s, examples: %d, mean loss: %f, speed: %.1f batch/sec, lr: %f',
                               batch_id + 1, (batch_id + 1) * params['train_batch_size'],
                               np.mean(losses[-params['report_every']:]), speed, self._get_lr(optimizer))
+            '''
             if (batch_id + 1) % params['eval_every'] == 0:
                 logging.info('Start eval')
                 eval_batch_size = params['eval_batch_size']
@@ -198,8 +195,8 @@ class NeuralModel():
                                                                          eval_batch_size, params['num_auccess_tasks'])
                 logging.info('__log__:%s', stats)
             #cudaFree(device)
-
-            statistic = dict(max_loss = max_loss, min_loss = min_loss, loss_var= loss_var, max_loss_index = max_loss_index,min_loss_index = min_loss_index, max_loss_action= max_loss_action, min_loss_action = min_loss_action)
+            ''', 
+            statistic = dict(max_loss = max_loss, min_loss = min_loss, loss_var= loss_var, max_loss_index = max_loss_index,min_loss_index = min_loss_index, max_loss_action= max_loss_action, min_loss_action = min_loss_action, mean_loss = mean_loss)
 
 
         return model.cpu(), statistic
@@ -207,8 +204,9 @@ class NeuralModel():
 
     def predict_qa(self, model, cache, task_ids, tier, action):
 
-        predicting_data = cache.get_sample(task_ids, 9)
+        predicting_data = cache.get_sample(task_ids, 9)        
 
+        edge = self._make_edges()
         task_indices, is_solved, actions, simulator, observations = (self._compact_simulation_data_to_trainset(tier, predicting_data))
 
         #action = actions[action_num]
@@ -249,22 +247,24 @@ class NeuralModel():
         #pdb.set_trace()
        # _ = model(batch_observations, batch_actions)
 
-        predict_location = model.predict_location(model(observation, action))
+        predict_location = model.predict_location(model(observation, action), edge)
         predict_location = predict_location.detach().cpu().numpy() * 256 //1
 
         predict_location.astype('int')
         predict_location = np.where(predict_location<0, 0, predict_location)
         predict_location = np.where(predict_location>255, 255, predict_location)
         predict_location = predict_location[0]
+        pdb.set_trace()
 
-        obs_predict = np.zeros((10, 256, 256), dtype = int)
+        obs_predict = np.zeros((16, 256, 256), dtype = int)
         #pdb.set_trace()
-        for t in range(10):
+        for t in range(16):
             for i in range(10):
                 for j in range(10):
                     obs_predict[t][int((predict_location[t][0]+5-i)%256)][int((predict_location[t][1]+5-j)%256)] = 1
                     obs_predict[t][int((predict_location[t][2]+5-i)%256)][int((predict_location[t][3]+5-j)%256)] = 2
                     obs_predict[t][int((predict_location[t][4]+5-i)%256)][int((predict_location[t][5]+5-j)%256)] = 3
+                    obs_predict[t][int((predict_location[t][6]+5-i)%256)][int((predict_location[t][7]+5-j)%256)] = 5
 
 
         return intermediate, obs_predict
@@ -275,10 +275,11 @@ class NeuralModel():
         # set model to the evaluation mode
         with torch.no_grad():
             preprocessed = model.preprocess(torch.LongTensor(observation).unsqueeze(0))
+            edge = self._make_edges()
             for batch_start in range(0, len(actions), batch_size):
                 batch_end = min(len(actions), batch_start + batch_size)
                 batch_actions = torch.FloatTensor(actions[batch_start:batch_end])
-                batch_scores = model.compute_reward(model(None, batch_actions, preprocessed=preprocessed))
+                batch_scores = model.compute_reward(model(None, batch_actions, preprocessed=preprocessed), edge)
                 scores.append(batch_scores.cpu().numpy())
         return np.concatenate(scores)
 
@@ -422,3 +423,25 @@ class NeuralModel():
                 intermediate = np.concatenate((intermediate, a), axis = 0)
 
         return intermediate
+                                               
+    def _make_edges(self):
+                                               
+        N = np.eye(5)
+        for i in range(5):
+            if i == 0 :
+                n = N[i]
+                Rs = np.tile(n , (4,1))
+            else:
+                n = N[i]
+                n = np.tile(n, (4,1))
+                Rs = np.concatenate((Rs, n))
+
+        Rs = np.transpose(Rs)
+        M = np.eye(4)
+        Rr = np.tile(M, (1,5))
+        zero = np.zeros((1,20))
+        Rr = np.concatenate((Rr, zero))
+
+        edge = dict(Rs = Rs, Rr = Rr)
+                                               
+        return edge
