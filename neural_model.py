@@ -31,7 +31,8 @@ class NeuralModel():
         logging.info('Create evaluation data from train & dev')
         eval_train = self._create_balanced_eval_set(cache, simulator.task_ids, params['eval_size'], tier)
         eval_dev   = self._create_balanced_eval_set(cache, dev_task_ids, params['eval_size'], tier)
-
+        #eval_test = self._create_balanced_eval_set(cache, dev_task_ids, 512, tier)
+        
         #################
         ## Build Model ##
         #################
@@ -179,23 +180,23 @@ class NeuralModel():
                 logging.debug('Iter: %s, examples: %d, mean loss: %f, speed: %.1f batch/sec, lr: %f',
                               batch_id + 1, (batch_id + 1) * params['train_batch_size'],
                               np.mean(losses[-params['report_every']:]), speed, self._get_lr(optimizer))
-            '''
+            
             if (batch_id + 1) % params['eval_every'] == 0:
                 logging.info('Start eval')
                 eval_batch_size = params['eval_batch_size']
                 stats = {}
                 stats['batch_id'] = batch_id + 1
-                # TODO: modify the _eval_loss
+                #TODO: modify the _eval_loss
                 #stats['train_loss'] = self._eval_loss(model, eval_train, eval_batch_size)
-                #stats['dev_loss']   = self._eval_loss(model, eval_dev,  eval_batch_size)
-                if params['num_auccess_actions'] > 0:
-                    stats['train_auccess']= self._eval_and_score_actions(cache, model, eval_train, params['num_auccess_actions'],
-                                                                         eval_batch_size, params['num_auccess_tasks'])
-                    stats['dev_auccess']  = self._eval_and_score_actions(cache, model, eval_dev, params['num_auccess_actions'],
-                                                                         eval_batch_size, params['num_auccess_tasks'])
+                stats['dev_loss']  = self.get_test_loss(model, cache, dev_task_ids, tier)
+                #if params['num_auccess_actions'] > 0:
+                #    stats['train_auccess']= self._eval_and_score_actions(cache, model, eval_train, params['num_auccess_actions'],
+                #                                                         eval_batch_size, params['num_auccess_tasks'])
+                #    stats['dev_auccess']  = self._eval_and_score_actions(cache, model, eval_dev, params['num_auccess_actions'],
+                #                                                         eval_batch_size, params['num_auccess_tasks'])
                 logging.info('__log__:%s', stats)
             #cudaFree(device)
-            ''', 
+             
             statistic = dict(max_loss = max_loss, min_loss = min_loss, loss_var= loss_var, max_loss_index = max_loss_index,min_loss_index = min_loss_index, max_loss_action= max_loss_action, min_loss_action = min_loss_action, mean_loss = mean_loss)
 
 
@@ -268,6 +269,64 @@ class NeuralModel():
 
 
         return intermediate, obs_predict
+
+    def get_test_loss(self, model, cache, task_ids, tier):
+        
+        eval_test = self._create_balanced_eval_set(cache, task_ids, 512, tier)
+        task_indices, is_solved, actions, simulator, observations = eval_test
+        losses = []
+        observations = observations.to(model.device)
+        batch_size = 16
+        edge = self._make_edges()
+        #pdb.set_trace()
+        with torch.no_grad():
+            model.eval()
+            for i in range(0, len(task_indices), batch_size):
+                batch_indices = task_indices[i:i + batch_size]
+                batch_task_indices = task_indices[batch_indices]
+                batch_observations = observations[batch_task_indices]
+                batch_actions = actions[batch_indices]
+                batch_is_solved = is_solved[batch_indices]
+                
+                batch_answer = np.zeros((batch_size, 16, 8))
+                #pdb.set_trace()
+                batch_num = 0
+
+                for num in batch_indices:
+                    _, intermediate = simulator.simulate_single(task_indices[num].numpy(), actions[num].numpy(), need_images=True)
+                    intermediate = np.array(intermediate)
+                    intermediate_full = self._make_17(intermediate)
+
+                
+
+                    location_rb = np.where(intermediate_full[16]==1)
+                    location_gb = np.where(intermediate_full[16]==2)
+                    location_bb = np.where(intermediate_full[16]==3)
+                    if location_bb[0].size == 0:
+                        location_bb = np.where(intermediate_full[16]==4)
+                    location_grayb = np.where(intermediate_full[16]==5)
+                    batch_answer[batch_num][15][0] = np.mean(location_rb[0]) / 256
+                    batch_answer[batch_num][15][1] = np.mean(location_rb[1]) / 256
+                    batch_answer[batch_num][15][2] = np.mean(location_gb[0]) / 256
+                    batch_answer[batch_num][15][3] = np.mean(location_gb[1]) / 256
+                    batch_answer[batch_num][15][4] = np.mean(location_bb[0]) / 256
+                    batch_answer[batch_num][15][5] = np.mean(location_bb[1]) / 256
+                    if location_grayb[0].size == 0:
+                        batch_answer[batch_num][15][6] = 0
+                        batch_answer[batch_num][15][7] = 0
+                    else:
+                        batch_answer[batch_num][15][6] = np.mean(location_grayb[0]) / 256
+                        batch_answer[batch_num][15][7] = np.mean(location_grayb[1]) / 256
+                    batch_num = batch_num+1
+                
+                loss= model.compute_16_loss(model(batch_observations, batch_actions), edge, batch_answer, batch_is_solved)
+                
+                loss = torch.mean(loss)
+                
+                losses.append(loss.mean().item())
+            
+        return sum(losses) / len(task_indices)
+        
 
     def eval_actions(self, model, actions, batch_size, observation):
         """ Evaluate the score for each action with given observation """

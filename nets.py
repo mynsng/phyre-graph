@@ -115,6 +115,24 @@ class ResNet18FilmAction(nn.Module):
         #qa_loss + ce_loss
 
         return qa_loss#, ce_loss
+    
+    def compute_16_loss(self, embedding, edges, label_batch, targets):
+
+        label_batch = torch.from_numpy(label_batch).float().to(embedding.device)
+        predict_location, last_hidden = self.qna_networks(embedding, edges)
+
+        targets = targets.to(dtype=torch.float, device=embedding.device)
+        qa_loss = self.qna_networks.MSE_loss(label_batch, predict_location)
+        qa_loss = qa_loss[:, -1, :]
+        qa_loss = torch.mean(qa_loss, 1)
+        #last_hidden = nn.functional.adaptive_max_pool2d(last_hidden, 1)
+        #last_hidden = last_hidden.flatten(1)
+        #decision = self.reason(last_hidden).squeeze(-1)
+        #ce_loss = nn.functional.binary_cross_entropy_with_logits(decisions, targets, reduce = False)
+        #pdb.set_trace()
+        #qa_loss + ce_loss
+
+        return qa_loss
 
     def compute_reward(self, embedding, edges):
 

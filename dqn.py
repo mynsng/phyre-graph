@@ -14,7 +14,7 @@ default_params = {
     'learning_rate'       : 3e-4,
     'action_hidden_size'  : 512,
     'report_every'        : 1000,
-    'eval_every'          : 10000,
+    'eval_every'          : 20000,
     'eval_size'           : 10000,  # evaluation size of the train & dev data    # check later
     'num_auccess_actions' : 10000,  # number of actions to evaluate in AUCCESS
     'num_auccess_tasks'   : 200,
@@ -23,6 +23,7 @@ default_params = {
     'embed_size'          : 128,
     'hidden_size'         : 128,
     'report_statistic'    : 199000,
+    'test_size'           : 10000,
     
     'rank_size'            : 10000,
     'eval_batch_size'      : 128,
@@ -35,6 +36,16 @@ class DQNAgent():
     def __init__(self, params = default_params):
         self.params = default_params
         self.neural_model = NeuralModel()
+        
+    def build_model(self):
+        
+        model  = self.neural_model._build_model(network_type = self.params['network_type'],
+                                           action_space_dim = 3,
+                                           action_hidden_size = self.params['action_hidden_size'],
+                                           embed_size = self.params['embed_size'],
+                                           hidden_size = self.params['hidden_size'])
+        
+        return model
     
     def train(self, cache, task_ids, tier, dev_task_ids):
         model, statistic = self.neural_model.train(cache, 
@@ -100,6 +111,15 @@ class DQNAgent():
         obs, obs_predict = self.neural_model.predict_qa(model, cache, task_ids, tier, action)
         return obs, obs_predict
     
+    def get_test_loss(self, state, task_ids, tier):
+        
+        model = state['model']
+        cache = state['cache']
+        
+        model.cuda()
+        loss = self.neural_model.get_test_loss(model, cache, task_ids, tier)
+        
+        return loss
     
 if __name__=='__main__':
     agent = DQNAgent()
