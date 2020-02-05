@@ -115,8 +115,8 @@ class NeuralModel():
             batch_num = 0
 
             for num in batch_indices:
-                _, intermediate = simulator.simulate_single(task_indices[num].numpy(), actions[num].numpy(), need_images=True)
-                intermediate = np.array(intermediate)
+                simulation = simulator.simulate_action(task_indices[num].numpy(), actions[num].numpy(), need_images=True)
+                intermediate = np.array(simulation.images)
                 intermediate_full = self._make_17(intermediate)
 
                 for t in range(16):
@@ -128,6 +128,8 @@ class NeuralModel():
                     if location_bb[0].size == 0:
                         location_bb = np.where(intermediate_full[input_t]==4)
                     location_grayb = np.where(intermediate_full[input_t]==5)
+                    if (location_rb[0].size*location_bb[0].size*location_gb[0].size) == 0:
+                        pdb.set_trace()
                     batch_answer[batch_num][t][0] = np.mean(location_rb[0]) / 256
                     batch_answer[batch_num][t][1] = np.mean(location_rb[1]) / 256
                     batch_answer[batch_num][t][2] = np.mean(location_gb[0]) / 256
@@ -197,7 +199,7 @@ class NeuralModel():
                 logging.info('__log__:%s', stats)
             #cudaFree(device)
              
-            statistic = dict(max_loss = max_loss, min_loss = min_loss, loss_var= loss_var, max_loss_index = max_loss_index,min_loss_index = min_loss_index, max_loss_action= max_loss_action, min_loss_action = min_loss_action, mean_loss = mean_loss)
+            statistic = dict(max_loss = max_loss, min_loss = min_loss, loss_var= loss_var, max_loss_index = max_loss_index, min_loss_index = min_loss_index, max_loss_action= max_loss_action, min_loss_action = min_loss_action, mean_loss = mean_loss)
 
 
         return model.cpu(), statistic
@@ -220,8 +222,8 @@ class NeuralModel():
         observation = np.array(observation)
 
 
-        _, intermediate = simulator.simulate_single(task_index, action, need_images=True)
-        intermediate = np.array(intermediate)
+        simulation = simulator.simulate_action(task_index, action, need_images=True)
+        intermediate = np.array(simulation.images)
         intermediate = self._make_17(intermediate)
         #initial_label = np.zeros(6)
 
@@ -293,11 +295,9 @@ class NeuralModel():
                 batch_num = 0
 
                 for num in batch_indices:
-                    _, intermediate = simulator.simulate_single(task_indices[num].numpy(), actions[num].numpy(), need_images=True)
-                    intermediate = np.array(intermediate)
+                    simulation = simulator.simulate_action(task_indices[num].numpy(), actions[num].numpy(), need_images=True)
+                    intermediate = np.array(simulation.images)
                     intermediate_full = self._make_17(intermediate)
-
-                
 
                     location_rb = np.where(intermediate_full[16]==1)
                     location_gb = np.where(intermediate_full[16]==2)
@@ -319,7 +319,7 @@ class NeuralModel():
                         batch_answer[batch_num][15][7] = np.mean(location_grayb[1]) / 256
                     batch_num = batch_num+1
                 
-                loss= model.compute_16_loss(model(batch_observations, batch_actions), edge, batch_answer, batch_is_solved)
+                loss = model.compute_16_loss(model(batch_observations, batch_actions), edge, batch_answer, batch_is_solved)
                 
                 loss = torch.mean(loss)
                 
@@ -374,10 +374,10 @@ class NeuralModel():
             for action in sorted_actions:
                 if (evaluator.get_attempts_for_task(i) >= phyre.MAX_TEST_ATTEMPTS):
                     break
-                status, _ = simulator.simulate_single(task_index,
+                simulation = simulator.simulate_action(task_index,
                                                       action,
                                                       need_images=False)
-                evaluator.maybe_log_attempt(i, status)
+                evaluator.maybe_log_attempt(i, simulation.simulation_status)
         return evaluator.get_aucess()
 
     def _get_lr(self, optimizer):
