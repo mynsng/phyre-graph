@@ -9,7 +9,7 @@ mpl_logger = logging.getLogger('matplotlib')
 mpl_logger.setLevel(logging.WARNING) 
 
 import os
-os.environ['CUDA_VISIBLE_DEVICES']='0'
+os.environ['CUDA_VISIBLE_DEVICES']='1'
 
 tier = 'ball'
 eval_setup = 'ball_within_template'
@@ -32,7 +32,6 @@ agent = DQNAgent()
 #model.load_state_dict(torch.load("./model/test_model.pth"))
 #state = dict(model =model, cache = cache)
 
-
 state, statistic = agent.train(cache, train, tier, test)
 
 loss = agent.get_test_loss(state, test, tier)
@@ -42,9 +41,10 @@ print(loss)
 model = state['model']
 
 #save
-savePath = "./model/64_512_within.pth"
+savePath = "./model/16_512_within.pth"
 torch.save(model.state_dict(), savePath)
 
-file=open("./model/64_512_statistic","wb") 
+file=open("./model/16_512_statistic","wb") 
 pickle.dump(statistic,file) 
 file.close()
+

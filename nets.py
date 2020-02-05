@@ -29,7 +29,7 @@ class ResNet18FilmAction(nn.Module):
         conv1 = nn.Conv2d(1,64, kernel_size=7, stride=2, padding=3, bias=False)
         self.register_buffer('embed_weights', torch.eye(phyre.NUM_COLORS))
         self.stem = nn.Sequential(conv1, net.bn1, net.relu, net.maxpool)
-        self.stages = nn.ModuleList([net.layer1, net.layer2, net.graphlayer1, net.graphlayer2])
+        self.stages = nn.ModuleList([net.layer1, net.layer2, net.layer3, net.layer4])
 
         self.qna_networks = LightGraphQA(embed_size, hidden_size) #both 256
 
@@ -56,7 +56,7 @@ class ResNet18FilmAction(nn.Module):
         black = image[:, 6, :, :].unsqueeze(1)
         entities = [green, blue, gray, black]
         entity = torch.empty((batch_size, 4, 1, 256, 256)).cuda()
-        node_features = torch.empty((batch_size, 5, 128)).cuda()
+        node_features = torch.empty((batch_size, 5, 512)).cuda()
         t = 0
         for obj in entities:
             entity[:, t, :, :, : ] = obj
@@ -68,7 +68,7 @@ class ResNet18FilmAction(nn.Module):
             features = stage(features)
         features = nn.functional.adaptive_max_pool2d(features, 1)
         features = features.flatten(1)
-        features = features.view(batch_size, -1, 128)
+        features = features.view(batch_size, -1, 512)
         node_features[:, 1:5, :] = features
             
         return node_features
@@ -94,7 +94,7 @@ class ResNet18FilmAction(nn.Module):
     def predict_location(self, embedding, edges):
 
         outputs, _ = self.qna_networks(embedding, edges)
-
+      
         return outputs
 
     def compute_loss(self, embedding, edges, label_batch, targets):
@@ -145,12 +145,10 @@ class ResNet18FilmAction(nn.Module):
         return decision
 
     def _image_colors_to_onehot(self, indices):
-
         onehot = torch.nn.functional.embedding(
             indices.to(dtype=torch.long, device=self.embed_weights.device),
             self.embed_weights)
         onehot = onehot.permute(0, 3, 1, 2).contiguous()
-
         return onehot
 
     def _apply_action(self, action):
@@ -396,8 +394,8 @@ class LightGraphQA(nn.Module):
         # output_size is designated as a number of channel in resnet
         self.register_buffer('embed_weights', torch.eye(phyre.NUM_COLORS)) #이거 왜있는거죠?
 
-        self.graph_net = InteractionNetwork(128,128)
-        self.location = nn.Linear(128, 2)
+        self.graph_net = InteractionNetwork(512,128)
+        self.location = nn.Linear(512, 2)
         #self.loss_fn = nn.MSELoss()
 
     @property
@@ -447,8 +445,8 @@ class InteractionNetwork(nn.Module):
         super(InteractionNetwork, self).__init__()
         
         self.object_dim = object_dim
-        self.relational_model = RelationalModel(2*object_dim, effect_dim, 256)
-        self.object_model     = ObjectModel(object_dim + effect_dim, object_dim, 128)
+        self.relational_model = RelationalModel(2*object_dim, effect_dim, 512)
+        self.object_model     = ObjectModel(object_dim + effect_dim, object_dim, 512)
     
     def forward(self, obj_vecs, edges):
         

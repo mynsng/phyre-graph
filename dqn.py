@@ -6,10 +6,10 @@ import pdb
 
 default_params = {
     'network_type'        :'resnet18',
-    'train_batch_size'    : 64,
+    'train_batch_size'    : 16,
     'max_train_actions'   : 100000,
     'balance_classes'     : True,   # balancing is critical for the 2B-tasks
-    'updates'             : 100000, # number of total updates to perform
+    'updates'             : 200000, # number of total updates to perform
     'cosine_scheduler'    : True,
     'learning_rate'       : 3e-4,
     'action_hidden_size'  : 512,
@@ -22,7 +22,7 @@ default_params = {
     'max_predict_actions' : 1,
     'embed_size'          : 128,
     'hidden_size'         : 128,
-    'report_statistic'    : 99900,
+    'report_statistic'    : 199900,
     'test_size'           : 10000,
     
     'rank_size'            : 10000,
