@@ -12,7 +12,7 @@ import os
 os.environ['CUDA_VISIBLE_DEVICES']='1'
 
 tier = 'ball'
-eval_setup = 'ball_within_template'
+eval_setup = 'ball_cross_template'
 fold_id = 0
 random.seed(0)
 
@@ -41,10 +41,10 @@ print(loss)
 model = state['model']
 
 #save
-savePath = "./model/16_512_within.pth"
+savePath = "./model/16_512_cross.pth"
 torch.save(model.state_dict(), savePath)
 
-file=open("./model/16_512_statistic","wb") 
+file=open("./model/16_512_cross_statistic","wb") 
 pickle.dump(statistic,file) 
 file.close()
 
