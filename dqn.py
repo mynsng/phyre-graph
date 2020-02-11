@@ -47,6 +47,12 @@ class DQNAgent():
         
         return model
     
+    def build_reward_model(self):
+        
+        model  = self.neural_model._build_reward_model()
+        
+        return model
+    
     def train(self, cache, task_ids, tier, dev_task_ids):
         model, statistic = self.neural_model.train(cache, 
                                         task_ids, 
@@ -66,6 +72,22 @@ class DQNAgent():
         #torch.cuda.empty_cache()
         return state, statistic
     
+    def reward_train(self, trained_model, cache, task_ids, tier, dev_task_ids):
+        
+        trained_model.cuda()
+        model = self.neural_model.reward_train(trained_model, 
+                                                   cache, 
+                                                task_ids, 
+                                                tier, 
+                                                dev_task_ids, 
+                                                default_params)
+        trained_model.cpu()
+        
+        state = dict(model = model, trained_model = trained_model, cache = cache)
+        #torch.cuda.empty_cache()
+        return state
+        
+    
     def eval(self, state, task_ids, tier):
         model  = state['model']
         cache  = state['cache']
@@ -82,6 +104,39 @@ class DQNAgent():
             task_id = simulator.task_ids[task_index]
             observation = observations[task_index]
             scores  = self.neural_model.eval_actions(model,
+                                                     actions,
+                                                     self.params['eval_batch_size'],
+                                                     observation)
+            # Rank of the actions in descending order
+            action_order = np.argsort(-scores)
+            # Result of the actions are already stored in cache
+            statuses = cache.load_simulation_states(task_id)
+            
+            for action_id in action_order:
+                if evaluator.get_attempts_for_task(task_index) >= self.params['max_attempts_per_task']:
+                    break
+                status = phyre.SimulationStatus(statuses[action_id])
+                evaluator.maybe_log_attempt(task_index, status)
+        return evaluator
+    
+    def reward_eval(self, state, task_ids, tier):
+        model  = state['model']
+        trained_model = state['trained_model']
+        cache  = state['cache']
+        # NOTE: Current agent is only using the actions that are seen in the training set,
+        #       though agent has the ability to rank the actions that are not seen in the training set
+        actions = state['cache'].action_array[:self.params['rank_size']]
+        
+        model.cuda()
+        trained_model.cuda()
+        simulator = phyre.initialize_simulator(task_ids, tier)
+        observations = simulator.initial_scenes
+        evaluator = phyre.Evaluator(task_ids)
+        
+        for task_index in range(len(task_ids)):
+            task_id = simulator.task_ids[task_index]
+            observation = observations[task_index]
+            scores  = self.neural_model.eval_actions(model, trained_model, 
                                                      actions,
                                                      self.params['eval_batch_size'],
                                                      observation)

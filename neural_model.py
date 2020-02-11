@@ -152,7 +152,7 @@ class NeuralModel():
 
             optimizer.zero_grad()
             embedding = model(batch_observations, batch_actions)
-            qa_loss= model.compute_loss(embedding, edge, batch_answer, batch_is_solved)
+            qa_loss, ce_loss = model.compute_loss(embedding, edge, batch_answer, batch_is_solved)
 
             if (batch_id+1) > params['report_statistic']:
                 max_loss.append(qa_loss.max().item())
@@ -166,7 +166,7 @@ class NeuralModel():
                 max_loss_action.append(batch_actions[max_index])
                 min_loss_action.append(batch_actions[min_index])
 
-            loss = qa_loss# + ce_loss
+            loss = qa_loss + ce_loss
             loss = torch.mean(loss)
 
             loss.backward()
@@ -190,12 +190,12 @@ class NeuralModel():
                 stats['batch_id'] = batch_id + 1
                 #TODO: modify the _eval_loss
                 #stats['train_loss'] = self._eval_loss(model, eval_train, eval_batch_size)
-                stats['dev_loss']  = self.get_test_loss(model, cache, dev_task_ids, tier)
-                #if params['num_auccess_actions'] > 0:
-                #    stats['train_auccess']= self._eval_and_score_actions(cache, model, eval_train, params['num_auccess_actions'],
-                #                                                         eval_batch_size, params['num_auccess_tasks'])
-                #    stats['dev_auccess']  = self._eval_and_score_actions(cache, model, eval_dev, params['num_auccess_actions'],
-                #                                                         eval_batch_size, params['num_auccess_tasks'])
+                #stats['dev_loss']  = self.get_test_loss(model, cache, dev_task_ids, tier)
+                if params['num_auccess_actions'] > 0:
+                    stats['train_auccess']= self._eval_and_score_actions(cache, model, eval_train, params['num_auccess_actions'],
+                                                                         eval_batch_size, params['num_auccess_tasks'])
+                    stats['dev_auccess']  = self._eval_and_score_actions(cache, model, eval_dev, params['num_auccess_actions'],
+                                                                         eval_batch_size, params['num_auccess_tasks'])
                 logging.info('__log__:%s', stats)
             #cudaFree(device)
              
@@ -203,6 +203,120 @@ class NeuralModel():
 
 
         return model.cpu(), statistic
+    
+    def reward_train(self, trained_model, cache, task_ids, tier, dev_task_ids, params):
+        
+        for param in trained_model.parameters():
+            param.requires_grad = False
+            
+        logging.info('Preprocess the training data')
+        training_data = cache.get_sample(task_ids, params['max_train_actions'])
+        # **training_data is passed as an argument to send the dictionary's keywords together
+
+        task_indices, is_solved, actions, simulator, observations = (self._compact_simulation_data_to_trainset(tier, training_data))
+
+        logging.info('Train set: size=%d, solved_ratio=%.2f%%', len(is_solved),is_solved.float().mean().item() * 100)
+
+        # create the evaluation data to evaluate the training process (-> not the test data)
+        logging.info('Create evaluation data from train & dev')
+        eval_train = self._create_balanced_eval_set(cache, simulator.task_ids, params['eval_size'], tier)
+        eval_dev   = self._create_balanced_eval_set(cache, dev_task_ids, params['eval_size'], tier)
+        #eval_test = self._create_balanced_eval_set(cache, dev_task_ids, 512, tier)
+        
+        #################
+        ## Build Model ##
+        #################
+        # Initialize the model
+        logging.info('Start initializing the Model')
+        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        model  = self._build_reward_model()
+        # Set model to the training mode (important when using batchnorm / dropout)
+        model.train()
+        model.to(device)
+
+        # Initialize the optimizer
+        optimizer = torch.optim.Adam(model.parameters(), lr=params['learning_rate'])
+        if params['cosine_scheduler']:
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,
+                                                                   T_max=params['updates'])
+        else:
+            scheduler = None
+            
+        #################
+        ## Train Model ##
+        #################
+        rng = np.random.RandomState(42)
+        # generator function to sample the batch data
+        def train_indices_sampler():
+            train_batch_size = params['train_batch_size']
+            indices = np.arange(len(is_solved))
+            # balancing is critical in the 2B-tier
+            if params['balance_classes']:
+                solved_mask = is_solved.numpy() > 0
+                positive_indices = indices[solved_mask]
+                negative_indices = indices[~solved_mask]
+                half_size = train_batch_size // 2
+                while True:
+                    positives = rng.choice(positive_indices, size=half_size)
+                    negatives = rng.choice(negative_indices, size=half_size)
+                    yield np.concatenate((positives, negatives))
+            else:
+                while True:
+                    yield rng.choice(indices, size=train_batch_size)
+
+        logging.info('Start Training the Model')
+        batch_start = 0
+        losses= []
+        last_time = time.time()
+        observations = observations.to(device)
+        # transfer (actions, is_solved) to the GPU's memory
+        actions = actions.pin_memory()
+        is_solved = is_solved.pin_memory()
+        
+        edges = self._make_edges()
+        
+        for batch_id, batch_indices in enumerate(train_indices_sampler(),start=batch_start):
+            if batch_id >= params['updates']:
+                break
+            model.train()
+            batch_task_indices = task_indices[batch_indices]
+            batch_observations = observations[batch_task_indices]
+            batch_actions = actions[batch_indices].to(device, non_blocking=True)
+            batch_is_solved = is_solved[batch_indices].to(device, non_blocking=True)
+            
+            optimizer.zero_grad()
+        
+            embedding = trained_model.last_hidden(trained_model(batch_observations, batch_actions), edges)
+            loss = model.ce_loss(model(embedding),batch_is_solved)
+            loss.backward()
+            optimizer.step()
+            losses.append(loss.mean().item())
+            if scheduler is not None:
+                scheduler.step()
+            if (batch_id + 1) % params['report_every'] == 0:
+                speed = params['report_every'] / (time.time() - last_time)
+                last_time = time.time()
+                logging.debug('Iter: %s, examples: %d, mean loss: %f, speed: %.1f batch/sec, lr: %f', 
+                              batch_id + 1, (batch_id + 1) * params['train_batch_size'],
+                              np.mean(losses[-params['report_every']:]), speed, self._get_lr(optimizer))
+                
+            if (batch_id + 1) % params['eval_every'] == 0:
+                logging.info('Start eval')
+                eval_batch_size = params['eval_batch_size']
+                stats = {}
+                stats['batch_id'] = batch_id + 1
+                # TODO: modify the _eval_loss
+                #stats['train_loss'] = self._eval_loss(model, eval_train, eval_batch_size)
+                #stats['dev_loss']   = self._eval_loss(model, eval_dev,  eval_batch_size)
+                if params['num_auccess_actions'] > 0:
+                    stats['train_auccess']= self._eval_and_score_actions(cache, model, trained_model, eval_train, params['num_auccess_actions'], 
+                                                                         eval_batch_size, params['num_auccess_tasks'])
+                    stats['dev_auccess']  = self._eval_and_score_actions(cache, model, trained_model, eval_dev, params['num_auccess_actions'], 
+                                                                         eval_batch_size, params['num_auccess_tasks'])
+                logging.info('__log__:%s', stats)
+                print('123')
+                
+        return model.cpu()
 
 
     def predict_qa(self, model, cache, task_ids, tier, action):
@@ -334,11 +448,12 @@ class NeuralModel():
         # set model to the evaluation mode
         with torch.no_grad():
             preprocessed = model.preprocess(torch.LongTensor(observation).unsqueeze(0))
-            edge = self._make_edges()
+            edges = self._make_edges()
             for batch_start in range(0, len(actions), batch_size):
                 batch_end = min(len(actions), batch_start + batch_size)
                 batch_actions = torch.FloatTensor(actions[batch_start:batch_end])
-                batch_scores = model.compute_reward(model(None, batch_actions, preprocessed=preprocessed), edge)
+                embedding = model.last_hidden(model(None, batch_actions, preprocessed=preprocessed), edges)
+                batch_scores = model.get_score(embedding)
                 scores.append(batch_scores.cpu().numpy())
         return np.concatenate(scores)
 
@@ -377,7 +492,7 @@ class NeuralModel():
                 simulation = simulator.simulate_action(task_index,
                                                       action,
                                                       need_images=False)
-                evaluator.maybe_log_attempt(i, simulation.simulation_status)
+                evaluator.maybe_log_attempt(i, simulation.status)
         return evaluator.get_aucess()
 
     def _get_lr(self, optimizer):
@@ -397,6 +512,12 @@ class NeuralModel():
                                             action_hidden_size = action_hidden_size)
         else:
             raise ValueError('Unknown network type: %s' % network_type)
+        return model
+    
+    def _build_reward_model(self):
+        
+        model = nets.RewardFCNet()
+    
         return model
 
 

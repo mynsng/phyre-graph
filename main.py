@@ -12,7 +12,7 @@ import os
 os.environ['CUDA_VISIBLE_DEVICES']='1'
 
 tier = 'ball'
-eval_setup = 'ball_cross_template'
+eval_setup = 'ball_within_template'
 fold_id = 0
 random.seed(0)
 
@@ -32,19 +32,18 @@ agent = DQNAgent()
 #model.load_state_dict(torch.load("./model/test_model.pth"))
 #state = dict(model =model, cache = cache)
 
-state, statistic = agent.train(cache, train, tier, test)
-
-loss = agent.get_test_loss(state, test, tier)
-print('test_loss')
-print(loss)
+state, statistic = agent.train(cache, train, tier, dev)
 
 model = state['model']
 
 #save
-savePath = "./model/16_512_cross.pth"
+savePath = "./model/16_512_within_auccess.pth"
 torch.save(model.state_dict(), savePath)
 
-file=open("./model/16_512_cross_statistic","wb") 
+file=open("./model/16_512_within_auccess_stt","wb") 
 pickle.dump(statistic,file) 
 file.close()
 
+evaluator = agent.eval(state, test, tier)
+
+print('AUCESS after 100 attempts on test set', evaluator.get_aucess())

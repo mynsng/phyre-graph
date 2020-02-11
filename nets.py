@@ -15,6 +15,33 @@ def _init_weights(module):
         if isinstance(module, nn.Linear):
             nn.init.kaiming_normal_(module.weight, a=2)
             
+class RewardFCNet(nn.Module):
+            
+    def __init__(self):
+        super().__init__()
+        
+        self.pooling = nn.Linear(5,1)
+        self.reason = nn.Sequential(
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Linear(256, 1)
+        )
+        
+    def forward(self, embedding):
+        
+        batch_size, n, input_size = embedding.size()
+        embedding= embedding.view(-1, n)
+        graph = self.pooling(embedding)
+        graph = graph.view(batch_size, -1)
+        reward = self.reason(graph)
+        reward = reward.squeeze(1)
+        
+        return reward
+    
+    def ce_loss(self, decisions, targets):
+        targets = targets.to(dtype=torch.float, device=decisions.device)
+        return nn.functional.binary_cross_entropy_with_logits(decisions, targets)
+        
 class ResNet18FilmAction(nn.Module):
 
     def __init__(self,
@@ -32,9 +59,8 @@ class ResNet18FilmAction(nn.Module):
         self.stages = nn.ModuleList([net.layer1, net.layer2, net.layer3, net.layer4])
 
         self.qna_networks = LightGraphQA(embed_size, hidden_size) #both 256
-
         # number of channel in the last resnet is 256
-        self.reason = nn.Linear(128, 1)
+        self.reason = RewardFCNet()
 
     @property
     def device(self):
@@ -79,6 +105,8 @@ class ResNet18FilmAction(nn.Module):
         else:
             features = preprocessed
             
+        if features.shape[0] == 1 and action.shape[0] != 1:
+            features = features.expand(action.shape[0], 5, 512) 
         action = self._apply_action(action)
         action = torch.from_numpy(action).float().to(features.device)
         action = action.unsqueeze(1)
@@ -106,15 +134,16 @@ class ResNet18FilmAction(nn.Module):
         qa_loss = self.qna_networks.MSE_loss(label_batch, predict_location)
         qa_loss = torch.mean(qa_loss, 1)
         qa_loss = torch.mean(qa_loss, 1)
-        #pdb.set_trace()
-        #last_hidden = nn.functional.adaptive_max_pool2d(last_hidden, 1)
-        #last_hidden = last_hidden.flatten(1)
-        #decision = self.reason(last_hidden).squeeze(-1)
-        #ce_loss = nn.functional.binary_cross_entropy_with_logits(decisions, targets, reduce = False)
-        #pdb.set_trace()
-        #qa_loss + ce_loss
+        
+        ce_loss = self.reason.ce_loss(self.get_score(last_hidden), targets)
 
-        return qa_loss#, ce_loss
+        return qa_loss, ce_loss
+    
+    def get_score(self, embedding):
+        
+        score = self.reason(embedding)
+        
+        return score
     
     def compute_16_loss(self, embedding, edges, label_batch, targets):
 
@@ -134,15 +163,15 @@ class ResNet18FilmAction(nn.Module):
 
         return qa_loss
 
-    def compute_reward(self, embedding, edges):
+    def last_hidden(self, embedding, edges):
 
         _, last_hidden = self.qna_networks(embedding, edges)
 
         #last_hidden = nn.functional.adaptive_max_pool2d(last_hidden, 1)
         #last_hidden = last_hidden.flatten(1)
-        decision = self.reason(last_hidden).squeeze(-1)
+        #decision = self.reason(last_hidden).squeeze(-1)
 
-        return decision
+        return last_hidden
 
     def _image_colors_to_onehot(self, indices):
         onehot = torch.nn.functional.embedding(
@@ -165,225 +194,6 @@ class ResNet18FilmAction(nn.Module):
         return img
 
     #def auccess_loss(self, embedding, label_batch, targets)
-
-class GraphQA(nn.Module):
-
-    def __init__(self,
-                 entity_dim,
-                 hidden_size):
-        super().__init__()
-        # output_size is designated as a number of channel in resnet
-        self.register_buffer('embed_weights', torch.eye(phyre.NUM_COLORS)) #이거 왜있는거죠?
-
-        self.graph_net = BypassFactorGCNet(entity_dim)
-        self.location = nn.Linear(hidden_size, 2)
-        #self.loss_fn = nn.MSELoss()
-
-    @property
-    def device(self):
-        if hasattr(self, 'parameters') and next(self.parameters()).is_cuda:
-            return 'cuda'
-        else:
-            return 'cpu'
-
-
-    def forward(self, entity, edges):  #label = (batch, time, location)
-
-
-        batch_size = entity.size(0)
-        #edges = edges.to(entity.device)
-        outputs = torch.empty((batch_size, 16, 8)).cuda()
-        # If multiple actions are provided with a given image, shape should be adjusted
-        #if features.shape[0] == 1 and actions.shape[0] != 1:
-        #    features = features.expand(actions.shape[0], -1)
-
-        for t in range(16):
-
-            entity = self.graph_net(entity, edges)
-
-            red_out = self.location(entity[:, 0, :])
-            green_out = self.location(entity[:, 1, :])
-            blue_out = self.location(entity[:, 2, :])
-            gray_out = self.location(entity[:, 3, :])
-            pdb.set_trace()
-            out = torch.cat((red_out, green_out, blue_out, gray_out), 1)
-            #pdb.set_trace()
-            if t == 15:
-                last_location = entity
-            outputs[:, t, :] = out
-
-        return outputs, last_location
-
-    def MSE_loss(self, labels, targets):
-
-        #pdb.set_trace()
-        loss = nn.functional.mse_loss(labels, targets, reduce = False)
-
-        return loss
-
-
-class BypassFactorGCNet(nn.Module):
-    """ A sequence of scene graph convolution layers  """
-
-    def __init__(self, entity_dim, num_blocks=4, num_units=2,
-                 pooling='avg', preact_normalization='batch', spatial=1, stop_grad=True):
-        super().__init__()
-        self.spatial = spatial
-        dim_layers = [entity_dim * spatial * spatial] * num_blocks
-        self.entity_dim = entity_dim * spatial * spatial
-
-        self.num_layers = len(dim_layers) - 1
-        self.gblocks = nn.ModuleList()
-
-        self.stop_grad = stop_grad  ##??
-
-        for n in range(self.num_layers):
-            gblock_kwargs = {
-                'input_dim': dim_layers[n],
-                'output_dim': dim_layers[n + 1],
-                'num_units': num_units,
-                'pooling': pooling,
-                'preact_normalization': preact_normalization,
-            }
-            self.gblocks.append(GraphResBlock(**gblock_kwargs))
-
-    def forward(self, entity, edges, stop_grad=None):
-        """
-        :param pose: (Batch_size, N_o, C, H, W)
-        :param edges:
-        :return:
-        """
-        out = {}
-
-        if stop_grad and self.stop_grad:
-            entity = entity.clone()
-            entity= entity.detach()
-        ## check later! update vs not
-        Batch_size = entity.size(0)
-        N_o = entity.size(1)
-        entity = entity.view(Batch_size, N_o, -1)
-
-        for i in range(self.num_layers):
-            net = self.gblocks[i]
-            obj_vecs = net(entity, edges)
-
-        return obj_vecs
-
-class GraphResBlock(nn.Module):
-    """ A residual block of 2 Graph Conv Layer with one skip conection"""
-
-    def __init__(self, input_dim, output_dim, num_units=2, pooling='avg', preact_normalization='batch'):
-        super().__init__()
-        self.num_units = num_units
-        self.gconvs = nn.ModuleList()
-        gconv_kwargs = {
-            'input_dim': input_dim,
-            'output_dim': output_dim,
-            'pooling': pooling,
-            'preact_normalization': preact_normalization,
-        }
-        GraphUnit = GraphEdgeConv
-
-        for n in range(self.num_units):
-            if n == self.num_units - 1:
-                gconv_kwargs['output_dim'] = output_dim
-            else:
-                gconv_kwargs['output_dim'] = input_dim
-            self.gconvs.append(GraphUnit(**gconv_kwargs))
-
-    def forward(self, entity, edges):
-
-        for i in range(self.num_units):
-            gconv = self.gconvs[i]
-            obj_vecs = gconv(entity, edges)
-
-        return obj_vecs
-
-
-class GraphEdgeConv(nn.Module):
-    """
-    Single Layer of graph conv: node -> edge -> node
-    """
-    def __init__(self, input_dim, output_dim=None, edge_dim=128,
-                 pooling='avg', preact_normalization='batch'):
-        super().__init__()
-        if output_dim is None:
-            output_dim = 128
-        if edge_dim is None:
-            edge_dim = 128
-        self.input_dim = 128
-        self.output_dim = 128
-        self.edge_dim = 128
-        # Node, edge 개수 정하기
-
-        assert pooling in ['sum', 'avg', 'softmax'], 'Invalid pooling "%s"' % pooling
-        self.pooling = pooling
-
-        self.net_node2edge = build_pre_act(2*self.input_dim, edge_dim, 20, batch_norm=preact_normalization)
-        self.net_edge2node = build_pre_act(self.input_dim + edge_dim, self.input_dim, 5, batch_norm=preact_normalization)
-        self.net_node2edge.apply(_init_weights)
-        self.net_edge2node.apply(_init_weights)
-
-    def forward(self, obj_vecs, edges):
-        """
-        Inputs:
-          + obj_vecs: (Batch_size, N_o, F)
-          + edges:
-
-        Outputs:
-          + new_obj_vecs: (Batch_size, N_o, F)
-
-        Alg:
-          relu(AXW), new_AX = AX, mlp = relu(new_AX, W)
-        """
-        dtype, device = obj_vecs.dtype, obj_vecs.device
-        #pdb.set_trace()
-        obj_vecs = obj_vecs.transpose(1,2)
-        Rs = edges['Rs']
-        Rr = edges['Rr']
-        Rs = torch.from_numpy(Rs).float().to(device)
-        Rr = torch.from_numpy(Rr).float().to(device)
-        #pdb.set_trace()
-        V = obj_vecs.size(0)
-        N_o = obj_vecs.size(1)
-        #pdb.set_trace()
-        N_e = Rs.size(1)
-        #pdb.set_trace()
-
-
-        #Sender, Receiver Node Representation
-        src_obj = torch.matmul(obj_vecs, Rs)
-        dst_obj = torch.matmul(obj_vecs, Rr)
-        
-        # Node -> Edge, Massage Passing
-        node_obj = torch.cat([src_obj, dst_obj], dim=-1).view(-1, N_e, 256)
-        #pdb.set_trace()
-        if node_obj.size(0) != 1:
-            edge_obj = self.net_node2edge[0](node_obj)
-        else:
-            edge_obj = node_obj
-        edge_obj = self.net_node2edge[1](edge_obj)
-        edge_obj = self.net_node2edge[2](edge_obj)
-        #pdb.set_trace()
-        
-        # Edge - > Node, Massage Aggregation
-        aggregation_node = torch.matmul(Rr, edge_obj)
-        obj_vecs = obj_vecs.transpose(1,2)
-        update_node = torch.cat([obj_vecs, aggregation_node], dim=-1)
-        #pdb.set_trace()
-        if aggregation_node.size(0) != 1:
-            new_obj_vecs = self.net_edge2node[0](update_node)
-            #pdb.set_trace()
-        else:
-            new_obj_vecs = update_node
-            #pdb.set_trace()
-        #pdb.set_trace()
-        new_obj_vecs = self.net_edge2node[1](new_obj_vecs)
-        #pdb.set_trace()
-        new_obj_vecs = self.net_edge2node[2](new_obj_vecs)
-        #pdb.set_trace()
-        
-        return new_obj_vecs
     
 class LightGraphQA(nn.Module):
 
